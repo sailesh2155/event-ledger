@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: event-gateway
+  datasource:
+    url: jdbc:h2:mem:gatewaydb;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+
+server:
+  port: 8080
+
+# The assignment requires GET /health (not /actuator/health), so we remap
+# Actuator's web endpoints to the root path. This keeps Actuator's real
+# health indicators (incl. database connectivity) instead of a hand-rolled
+# controller that just returns {"status":"ok"}.
+management:
+  endpoints:
+    web:
+      base-path: /
+      exposure:
+        include: health
+      path-mapping:
+        health: health
+  endpoint:
+    health:
+      show-details: always
+
+# Base URL of the internal Account Service. Overridden by the
+# ACCOUNT_SERVICE_URL env var in docker-compose (service DNS name).
+account-service:
+  base-url: ${ACCOUNT_SERVICE_URL:http://localhost:8081}
