@@ -40,12 +40,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class EndToEndIntegrationTest {
 
-    /** The real Account Service, started before the Gateway context resolves its base-url. */
+    /**
+     * The real Account Service, started before the Gateway context resolves
+     * its base-url. Overrides are passed as COMMAND-LINE ARGS (highest
+     * property precedence): with two application.yml files on the test
+     * classpath, weaker .properties() defaults could be overridden by
+     * whichever yml wins, e.g. binding port 8080 and colliding with a
+     * locally running service. Args cannot be overridden by any yml.
+     */
     private static final ServletWebServerApplicationContext ACCOUNT_APP =
             (ServletWebServerApplicationContext) new SpringApplicationBuilder(AccountServiceApplication.class)
                     .run("--server.port=0",
                             "--spring.application.name=account-service",
                             "--spring.datasource.url=jdbc:h2:mem:accountdb-e2e;DB_CLOSE_DELAY=-1");
+
     @DynamicPropertySource
     static void pointGatewayAtRealAccountService(DynamicPropertyRegistry registry) {
         registry.add("account-service.base-url",
