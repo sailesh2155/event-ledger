@@ -1,0 +1,148 @@
+### ============ Health ============
+
+### Gateway health (expect UP with db details)
+GET http://localhost:8080/health
+
+### Account Service health
+GET http://localhost:8081/health
+
+
+### ============ Happy path ============
+
+### Submit a new event (expect 201, status PENDING)
+POST http://localhost:8080/events
+Content-Type: application/json
+
+{
+  "eventId": "evt-001",
+  "accountId": "acct-123",
+  "type": "CREDIT",
+  "amount": 150.00,
+  "currency": "USD",
+  "eventTimestamp": "2026-05-15T14:02:11Z",
+  "metadata": {
+    "source": "mainframe-batch",
+    "batchId": "B-9042"
+  }
+}
+
+### ============ Idempotency ============
+
+### Submit the EXACT same event again (expect 200, same body, no new row)
+POST http://localhost:8080/events
+Content-Type: application/json
+
+{
+  "eventId": "evt-001",
+  "accountId": "acct-123",
+  "type": "CREDIT",
+  "amount": 150.00,
+  "currency": "USD",
+  "eventTimestamp": "2026-05-15T14:02:11Z",
+  "metadata": {
+    "source": "mainframe-batch",
+    "batchId": "B-9042"
+  }
+}
+
+### Same eventId, DIFFERENT amount (expect 409 Conflict)
+POST http://localhost:8080/events
+Content-Type: application/json
+
+{
+  "eventId": "evt-001",
+  "accountId": "acct-123",
+  "type": "CREDIT",
+  "amount": 999.00,
+  "currency": "USD",
+  "eventTimestamp": "2026-05-15T14:02:11Z"
+}
+
+
+### ============ Out-of-order arrival ============
+
+### Later business time, arrives first
+POST http://localhost:8080/events
+Content-Type: application/json
+
+{
+  "eventId": "evt-003",
+  "accountId": "acct-777",
+  "type": "DEBIT",
+  "amount": 25.00,
+  "currency": "USD",
+  "eventTimestamp": "2026-05-15T15:00:00Z"
+}
+
+### Earlier business time, arrives second
+POST http://localhost:8080/events
+Content-Type: application/json
+
+{
+  "eventId": "evt-002",
+  "accountId": "acct-777",
+  "type": "CREDIT",
+  "amount": 100.00,
+  "currency": "USD",
+  "eventTimestamp": "2026-05-15T14:00:00Z"
+}
+
+### List events (expect evt-002 FIRST — chronological, not arrival order)
+GET http://localhost:8080/events?account=acct-777
+
+
+### ============ Retrieval ============
+
+### Get one event by id
+GET http://localhost:8080/events/evt-001
+
+### Unknown event (expect 404 with message)
+GET http://localhost:8080/events/evt-does-not-exist
+
+
+### ============ Validation errors (all expect 400) ============
+
+### Missing everything
+POST http://localhost:8080/events
+Content-Type: application/json
+
+{}
+
+### Negative amount
+POST http://localhost:8080/events
+Content-Type: application/json
+
+{
+  "eventId": "evt-bad-1",
+  "accountId": "acct-123",
+  "type": "DEBIT",
+  "amount": -10.00,
+  "currency": "USD",
+  "eventTimestamp": "2026-05-15T14:02:11Z"
+}
+
+### Unknown type
+POST http://localhost:8080/events
+Content-Type: application/json
+
+{
+  "eventId": "evt-bad-2",
+  "accountId": "acct-123",
+  "type": "TRANSFER",
+  "amount": 10.00,
+  "currency": "USD",
+  "eventTimestamp": "2026-05-15T14:02:11Z"
+}
+
+### Bad timestamp
+POST http://localhost:8080/events
+Content-Type: application/json
+
+{
+  "eventId": "evt-bad-3",
+  "accountId": "acct-123",
+  "type": "CREDIT",
+  "amount": 10.00,
+  "currency": "USD",
+  "eventTimestamp": "not-a-date"
+}
