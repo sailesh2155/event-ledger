@@ -1,6 +1,7 @@
 package com.eventledger.gateway.api.error;
 
 import com.eventledger.gateway.client.AccountServiceConflictException;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import com.eventledger.gateway.client.AccountServiceUnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -72,6 +73,21 @@ public class GlobalExceptionHandler {
                 .body(ApiError.of(503, "Service Unavailable",
                         "Account Service is currently unreachable. The event has been stored "
                                 + "and resubmitting the same event later is safe (idempotent)."));
+    }
+
+    /**
+     * Circuit breaker is OPEN: the Account Service has been failing repeatedly,
+     * so calls fail fast instead of burning timeouts. Same client experience
+     * as unavailability (503), with an honest explanation.
+     */
+    @ExceptionHandler(CallNotPermittedException.class)
+    public ResponseEntity<ApiError> handleCircuitOpen(CallNotPermittedException ex) {
+        log.warn("Circuit breaker open, failing fast: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(ApiError.of(503, "Service Unavailable",
+                        "Account Service has been failing repeatedly; requests are temporarily "
+                                + "rejected while it recovers (circuit breaker open). The event, if "
+                                + "submitted, has been stored and resubmitting later is safe."));
     }
 
     @ExceptionHandler(AccountServiceConflictException.class)

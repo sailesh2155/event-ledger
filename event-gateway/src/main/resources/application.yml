@@ -38,3 +38,23 @@ account-service:
   base-url: ${ACCOUNT_SERVICE_URL:http://localhost:8081}
   connect-timeout-ms: 2000
   read-timeout-ms: 3000
+
+# Circuit breaker on the Gateway -> Account Service call (Resilience4j).
+# Sliding window of the last 10 calls; if >=50% failed (min 5 calls seen),
+# the breaker OPENS: calls fail fast for 10s instead of each burning a
+# timeout. Then HALF_OPEN lets 3 trial calls through; success closes it.
+# recordExceptions limits what counts as "failure": only unavailability —
+# a 409 conflict is a correct answer, not a sick downstream.
+resilience4j:
+  circuitbreaker:
+    instances:
+      accountService:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        record-exceptions:
+          - com.eventledger.gateway.client.AccountServiceUnavailableException
