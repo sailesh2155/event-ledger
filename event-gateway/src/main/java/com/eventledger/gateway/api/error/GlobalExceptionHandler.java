@@ -1,5 +1,7 @@
 package com.eventledger.gateway.api.error;
 
+import com.eventledger.gateway.client.AccountServiceConflictException;
+import com.eventledger.gateway.client.AccountServiceUnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -54,6 +56,27 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(EventConflictException.class)
     public ResponseEntity<ApiError> handleConflict(EventConflictException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ApiError.of(409, "Conflict", ex.getMessage()));
+    }
+
+    /**
+     * Account Service down/unreachable -> 503, never a hang or a raw 500.
+     * The message tells the client the truth: the event is stored and a
+     * retry of the same submission is safe.
+     */
+    @ExceptionHandler(AccountServiceUnavailableException.class)
+    public ResponseEntity<ApiError> handleDownstreamUnavailable(AccountServiceUnavailableException ex) {
+        log.warn("Downstream unavailable: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(ApiError.of(503, "Service Unavailable",
+                        "Account Service is currently unreachable. The event has been stored "
+                                + "and resubmitting the same event later is safe (idempotent)."));
+    }
+
+    @ExceptionHandler(AccountServiceConflictException.class)
+    public ResponseEntity<ApiError> handleDownstreamConflict(AccountServiceConflictException ex) {
+        log.error("Downstream conflict (stores may have diverged): {}", ex.getMessage());
         return ResponseEntity.status(HttpStatus.CONFLICT)
                 .body(ApiError.of(409, "Conflict", ex.getMessage()));
     }

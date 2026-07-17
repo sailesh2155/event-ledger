@@ -3,7 +3,10 @@ package com.eventledger.gateway.service;
 import com.eventledger.gateway.api.dto.EventRequest;
 import com.eventledger.gateway.api.error.EventConflictException;
 import com.eventledger.gateway.api.error.EventNotFoundException;
+import com.eventledger.gateway.client.AccountServiceClient;
+import com.eventledger.gateway.client.ApplyTransactionRequest;
 import com.eventledger.gateway.domain.Event;
+import com.eventledger.gateway.domain.EventStatus;
 import com.eventledger.gateway.domain.EventType;
 import com.eventledger.gateway.repository.EventRepository;
 import org.slf4j.Logger;
@@ -19,41 +22,74 @@ public class EventService {
     private static final Logger log = LoggerFactory.getLogger(EventService.class);
 
     private final EventRepository repository;
+    private final AccountServiceClient accountServiceClient;
 
-    public EventService(EventRepository repository) {
+    public EventService(EventRepository repository, AccountServiceClient accountServiceClient) {
         this.repository = repository;
+        this.accountServiceClient = accountServiceClient;
     }
 
     /**
-     * Idempotent submission.
+     * Full submission flow — the dual-write problem handled explicitly:
      *
-     * Strategy: INSERT first and let the UNIQUE constraint on event_id decide.
-     * If the insert violates the constraint, the event already exists — we then
-     * compare payloads to distinguish a harmless retry (return the original)
-     * from a genuine conflict (409).
+     *   1. Store the event locally (status PENDING). The unique constraint on
+     *      eventId arbitrates duplicates, race-safely.
+     *   2. Call the Account Service to apply the transaction.
+     *   3. On success, mark the event APPLIED.
      *
-     * Deliberately NOT annotated @Transactional: the save must run (and flush)
-     * in its own transaction so that, when the constraint violation occurs, the
-     * follow-up SELECT executes in a fresh, healthy transaction. Wrapping both
-     * in one transaction would leave the persistence context in a rollback-only
-     * state after the failed insert, breaking the recovery query.
+     * If step 2 fails, the event REMAINS stored as PENDING and the client
+     * receives a 503. Resubmitting the same event later is safe and is the
+     * designed recovery path: the duplicate branch below retries the
+     * downstream call for PENDING events. Because the Account Service is
+     * itself idempotent on eventId, this retry can never double-apply — even
+     * in the lost-response case where the transaction WAS applied but the
+     * Gateway never learned of it.
+     *
+     * Not @Transactional, deliberately, for two reasons: (a) the recovery
+     * SELECT after a constraint violation needs a fresh transaction, and
+     * (b) an HTTP call must never run inside a database transaction — it
+     * would hold a DB connection hostage for the duration of network I/O.
      */
     public SubmissionResult submit(EventRequest request) {
         try {
             Event saved = repository.save(newEventFrom(request));
-            log.info("Stored new event eventId={} accountId={}", saved.getEventId(), saved.getAccountId());
+            log.info("Stored new event eventId={} accountId={}",
+                    saved.getEventId(), saved.getAccountId());
+            applyDownstream(saved);
             return new SubmissionResult(saved, true);
         } catch (DataIntegrityViolationException duplicate) {
             Event existing = repository.findByEventId(request.eventId())
-                    .orElseThrow(() -> duplicate); // constraint fired but row invisible: rethrow original
+                    .orElseThrow(() -> duplicate);
 
             if (!existing.matchesPayload(request)) {
                 log.warn("Conflicting resubmission for eventId={}", request.eventId());
                 throw new EventConflictException(request.eventId());
             }
-            log.info("Duplicate submission for eventId={}, returning original", request.eventId());
+
+            if (existing.getStatus() == EventStatus.PENDING) {
+                // Earlier attempt never confirmed downstream — this retry is
+                // the recovery path, and idempotency makes it harmless.
+                log.info("Duplicate submission for PENDING eventId={}, retrying downstream apply",
+                        request.eventId());
+                applyDownstream(existing);
+            } else {
+                log.info("Duplicate submission for eventId={}, returning original",
+                        request.eventId());
+            }
             return new SubmissionResult(existing, false);
         }
+    }
+
+    private void applyDownstream(Event event) {
+        accountServiceClient.applyTransaction(event.getAccountId(), new ApplyTransactionRequest(
+                event.getEventId(),
+                event.getType().name(),
+                event.getAmount(),
+                event.getCurrency(),
+                event.getEventTimestamp()
+        ));
+        event.markApplied();
+        repository.save(event);
     }
 
     public Event getByEventId(String eventId) {

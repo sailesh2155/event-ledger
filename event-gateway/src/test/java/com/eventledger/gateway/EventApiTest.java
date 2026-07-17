@@ -1,5 +1,7 @@
 package com.eventledger.gateway;
 
+import com.eventledger.gateway.client.AccountServiceClient;
+import com.eventledger.gateway.client.AccountServiceUnavailableException;
 import com.eventledger.gateway.repository.EventRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -8,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -20,6 +23,13 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -38,9 +48,19 @@ class EventApiTest {
     @Autowired
     private ObjectMapper objectMapper;
 
+    /**
+     * The downstream client is mocked in this suite: these tests target the
+     * Gateway's own behavior. Real cross-service integration is exercised in
+     * the dedicated integration test step. Default: downstream succeeds.
+     */
+    @MockBean
+    private AccountServiceClient accountServiceClient;
+
     @BeforeEach
     void cleanDatabase() {
         repository.deleteAll();
+        reset(accountServiceClient);
+        doNothing().when(accountServiceClient).applyTransaction(anyString(), any());
     }
 
     // ---------- helpers ----------
@@ -70,7 +90,7 @@ class EventApiTest {
     // ---------- core functionality ----------
 
     @Test
-    @DisplayName("POST /events stores a new event and returns 201 with status PENDING")
+    @DisplayName("POST /events stores the event, applies it downstream and returns 201 APPLIED")
     void createEvent() throws Exception {
         mockMvc.perform(post("/events")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -78,7 +98,9 @@ class EventApiTest {
                                 "2026-05-15T14:02:11Z")))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.eventId").value("evt-001"))
-                .andExpect(jsonPath("$.status").value("PENDING"));
+                .andExpect(jsonPath("$.status").value("APPLIED"));
+
+        verify(accountServiceClient).applyTransaction(org.mockito.ArgumentMatchers.eq("acct-123"), any());
 
         assertThat(repository.count()).isEqualTo(1);
     }
@@ -208,6 +230,77 @@ class EventApiTest {
     @DisplayName("Malformed timestamp is rejected with 400")
     void malformedTimestampRejected() throws Exception {
         postExpectingBadRequest(eventJson("evt-ts", "acct-1", "CREDIT", "10.00", "yesterday"));
+    }
+
+    // ---------- gateway -> account service wiring ----------
+
+    @Test
+    @DisplayName("Downstream failure returns 503 and the event stays stored as PENDING")
+    void downstreamFailureLeavesEventPending() throws Exception {
+        doThrow(new AccountServiceUnavailableException("connection refused"))
+                .when(accountServiceClient).applyTransaction(anyString(), any());
+
+        mockMvc.perform(post("/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(eventJson("evt-down", "acct-1", "CREDIT", "10.00",
+                                "2026-05-15T14:02:11Z")))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.messages[0]").value(
+                        org.hamcrest.Matchers.containsString("safe")));
+
+        // the event was stored despite the failure — that's the design
+        assertThat(repository.count()).isEqualTo(1);
+        assertThat(repository.findByEventId("evt-down").orElseThrow().getStatus().name())
+                .isEqualTo("PENDING");
+    }
+
+    @Test
+    @DisplayName("Resubmitting a PENDING event retries the downstream apply and marks it APPLIED")
+    void resubmissionRecoversPendingEvent() throws Exception {
+        // first attempt: downstream down -> 503, event PENDING
+        doThrow(new AccountServiceUnavailableException("connection refused"))
+                .when(accountServiceClient).applyTransaction(anyString(), any());
+        String json = eventJson("evt-recover", "acct-1", "CREDIT", "10.00", "2026-05-15T14:02:11Z");
+        postEvent(json);
+
+        // downstream recovers; client resubmits the SAME event
+        reset(accountServiceClient);
+        doNothing().when(accountServiceClient).applyTransaction(anyString(), any());
+
+        mockMvc.perform(post("/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json))
+                .andExpect(status().isOk()) // duplicate, not a new event
+                .andExpect(jsonPath("$.status").value("APPLIED"));
+
+        assertThat(repository.count()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("Resubmitting an already-APPLIED event does NOT call the Account Service again")
+    void appliedDuplicateSkipsDownstream() throws Exception {
+        String json = eventJson("evt-once", "acct-1", "CREDIT", "10.00", "2026-05-15T14:02:11Z");
+        postEvent(json); // succeeds, APPLIED, one downstream call
+
+        postEvent(json); // duplicate of an APPLIED event
+
+        verify(accountServiceClient, times(1)).applyTransaction(anyString(), any());
+    }
+
+    @Test
+    @DisplayName("Reads work even when the Account Service is down (graceful degradation)")
+    void readsWorkWhileDownstreamIsDown() throws Exception {
+        postEvent(eventJson("evt-read", "acct-read", "CREDIT", "10.00", "2026-05-15T14:02:11Z"));
+
+        // downstream dies AFTER the event exists
+        doThrow(new AccountServiceUnavailableException("connection refused"))
+                .when(accountServiceClient).applyTransaction(anyString(), any());
+
+        mockMvc.perform(get("/events/evt-read"))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/events").param("account", "acct-read"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].eventId").value("evt-read"));
     }
 
     private void postExpectingBadRequest(String json) throws Exception {

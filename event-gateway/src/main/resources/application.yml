@@ -32,5 +32,9 @@ management:
 
 # Base URL of the internal Account Service. Overridden by the
 # ACCOUNT_SERVICE_URL env var in docker-compose (service DNS name).
+# Timeouts are deliberately short: a hung downstream must never hold
+# Gateway threads hostage.
 account-service:
   base-url: ${ACCOUNT_SERVICE_URL:http://localhost:8081}
+  connect-timeout-ms: 2000
+  read-timeout-ms: 3000
