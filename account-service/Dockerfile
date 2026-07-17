@@ -4,8 +4,10 @@ WORKDIR /build
 
 # Copy only the POMs first and pre-fetch dependencies, so Docker layer
 # caching skips the (slow) dependency download when only source changes.
+# NOTE: the parent POM declares BOTH modules, so both module POMs must be
+# present for Maven to read the reactor, even when building just one module.
 COPY pom.xml .
-COPY account-service/pom.xml account-service/
+COPY event-gateway/pom.xml event-gateway/
 COPY account-service/pom.xml account-service/
 RUN mvn -q -pl account-service -am dependency:go-offline
 

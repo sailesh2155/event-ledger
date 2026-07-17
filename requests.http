@@ -146,3 +146,52 @@ Content-Type: application/json
   "currency": "USD",
   "eventTimestamp": "not-a-date"
 }
+
+
+### ============ Account Service (direct, port 8081 — local runs only; ============
+### ============ in Docker this port is intentionally unreachable)    ============
+
+### Apply a transaction (expect 201)
+POST http://localhost:8081/accounts/acct-500/transactions
+Content-Type: application/json
+
+{
+  "eventId": "evt-500",
+  "type": "CREDIT",
+  "amount": 300.00,
+  "currency": "USD",
+  "eventTimestamp": "2026-05-15T14:00:00Z"
+}
+
+### Replay the same transaction (expect 200, balance unchanged)
+POST http://localhost:8081/accounts/acct-500/transactions
+Content-Type: application/json
+
+{
+  "eventId": "evt-500",
+  "type": "CREDIT",
+  "amount": 300.00,
+  "currency": "USD",
+  "eventTimestamp": "2026-05-15T14:00:00Z"
+}
+
+### Debit the account (expect 201)
+POST http://localhost:8081/accounts/acct-500/transactions
+Content-Type: application/json
+
+{
+  "eventId": "evt-501",
+  "type": "DEBIT",
+  "amount": 120.00,
+  "currency": "USD",
+  "eventTimestamp": "2026-05-15T15:00:00Z"
+}
+
+### Balance (expect 180.00, transactionCount 2)
+GET http://localhost:8081/accounts/acct-500/balance
+
+### Account details (expect recent transactions, newest first)
+GET http://localhost:8081/accounts/acct-500
+
+### Unknown account (expect 404)
+GET http://localhost:8081/accounts/acct-ghost/balance
