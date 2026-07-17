@@ -23,7 +23,7 @@ management:
     web:
       base-path: /
       exposure:
-        include: health
+        include: health,metrics
       path-mapping:
         health: health
   endpoint:

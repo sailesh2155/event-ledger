@@ -8,6 +8,7 @@ import com.eventledger.gateway.client.ApplyTransactionRequest;
 import com.eventledger.gateway.domain.Event;
 import com.eventledger.gateway.domain.EventStatus;
 import com.eventledger.gateway.domain.EventType;
+import com.eventledger.gateway.metrics.EventMetrics;
 import com.eventledger.gateway.repository.EventRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,10 +24,14 @@ public class EventService {
 
     private final EventRepository repository;
     private final AccountServiceClient accountServiceClient;
+    private final EventMetrics metrics;
 
-    public EventService(EventRepository repository, AccountServiceClient accountServiceClient) {
+    public EventService(EventRepository repository,
+                        AccountServiceClient accountServiceClient,
+                        EventMetrics metrics) {
         this.repository = repository;
         this.accountServiceClient = accountServiceClient;
+        this.metrics = metrics;
     }
 
     /**
@@ -51,6 +56,7 @@ public class EventService {
      * would hold a DB connection hostage for the duration of network I/O.
      */
     public SubmissionResult submit(EventRequest request) {
+        metrics.markReceived();
         try {
             Event saved = repository.save(newEventFrom(request));
             log.info("Stored new event eventId={} accountId={}",
@@ -76,20 +82,23 @@ public class EventService {
                 log.info("Duplicate submission for eventId={}, returning original",
                         request.eventId());
             }
+            metrics.markDuplicate();
             return new SubmissionResult(existing, false);
         }
     }
 
     private void applyDownstream(Event event) {
-        accountServiceClient.applyTransaction(event.getAccountId(), new ApplyTransactionRequest(
-                event.getEventId(),
-                event.getType().name(),
-                event.getAmount(),
-                event.getCurrency(),
-                event.getEventTimestamp()
-        ));
+        metrics.timeDownstreamCall(() ->
+                accountServiceClient.applyTransaction(event.getAccountId(), new ApplyTransactionRequest(
+                        event.getEventId(),
+                        event.getType().name(),
+                        event.getAmount(),
+                        event.getCurrency(),
+                        event.getEventTimestamp()
+                )));
         event.markApplied();
         repository.save(event);
+        metrics.markApplied();
     }
 
     public Event getByEventId(String eventId) {
